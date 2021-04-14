@@ -1,9 +1,14 @@
 import socket
-import struct
 import threading
 
+import packageFactory
+
 print_lock = threading.Lock()
-ICMP_ECHO = 8
+recognizers = [(packageFactory.build_http_packet, packageFactory.is_http_package, "HTTP"),
+               (packageFactory.build_smtp_packet, packageFactory.is_smtp_package, "SMTP"),
+               (packageFactory.build_pop3_packet, packageFactory.is_pop3_package, "POP3"),
+               (packageFactory.build_dns_package, packageFactory.is_dns_package, "DNS"),
+               (packageFactory.build_ntp_packet, packageFactory.is_ntp_package, "SNTP")]
 
 
 def scan_port(ip, port):
@@ -11,64 +16,37 @@ def scan_port(ip, port):
     tcp_connect = sock_tcp.connect_ex((ip, port))
     if tcp_connect == 0:
         with print_lock:
-            print('TCP port :', port, ' is open.')
+            print('TCP port :', port, ' is open', end=" ")
+            print(scan_application_layer(sock_tcp))
     sock_tcp.close()
     scan_udp_port(ip, port)
+
+
+def scan_application_layer(sock):
+    for builder, recognizer, answer in recognizers:
+        try:
+            sock.settimeout(0.05)
+            sock.send(builder())
+            response = sock.recv(2048)
+            if recognizer(response):
+                return answer
+        except:
+            pass
+    return ""
 
 
 def scan_udp_port(ip, port):
     sock_upd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_connect = sock_upd.connect_ex((ip, port))
     if udp_connect == 0:
-        sock_icmp = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-        sock_icmp.sendto(make_icmp_package(port), (ip, port))
-        sock_icmp.settimeout(0.5)
-        try:
-            response = sock_icmp.recv(2048)
-            if our_icmp_response(response):
-                with print_lock:
-                    print('UDP port :', port, ' is open.')
-        except:
-            pass
-        finally:
-            sock_icmp.close()
+        with print_lock:
+            print('UDP port :', port, ' is open', end=" ")
+            application_layer = scan_application_layer(sock_upd)
+            if application_layer == "":
+                print("or filtered")
+            else:
+                print(scan_application_layer(sock_upd))
     sock_upd.close()
-
-
-def our_icmp_response(data):
-    icmp_header = data[20:28]
-    type, code, checksum, p_id, sequence = struct.unpack('BBHHH', icmp_header)
-    return type == 0 and code == 0
-
-
-def make_icmp_package(port):
-    checksum = 0
-
-    header = struct.pack(
-        "!BBHHH", ICMP_ECHO, 0, checksum, threading.current_thread().ident, port)
-
-    padBytes = []
-    startVal = 0x42
-    for i in range(startVal, startVal + 55):
-        padBytes += [(i & 0xff)]
-    data = bytes(padBytes)
-
-    checksum = calc_checksum(header + data)
-
-    header = struct.pack(
-        "!BBHHH", ICMP_ECHO, 0, checksum, threading.current_thread().ident, port)
-
-    packet = header + data
-
-    return packet
-
-
-def calc_checksum(packet: bytes) -> int:
-    words = [int.from_bytes(packet[_:_ + 2], "big") for _ in range(0, len(packet), 2)]
-    checksum = sum(words)
-    while checksum > 0xffff:
-        checksum = (checksum & 0xffff) + (checksum >> 16)
-    return 0xffff - checksum
 
 
 if __name__ == '__main__':
@@ -77,9 +55,16 @@ if __name__ == '__main__':
     start, stop = int(rng[0]), int(rng[1])
     pool = []
     print()
-    for i in range(start, stop):
-        thread = threading.Thread(target=scan_port, args=(ip, i))
+
+    for port in range(start, stop + 1):
+        thread = threading.Thread(target=scan_port, args=(ip, port))
         pool.append(thread)
         thread.start()
     for i in pool:
         i.join()
+
+    #  ntp3.stratum2.ru /sntp 25
+    #  vk.com /http 80
+    #  8.8.8.8 /dns 53
+    #  smtp.gmail.com /smtp 123
+    #  pop.masterhost.ru /pop3 110
